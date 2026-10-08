@@ -40,6 +40,17 @@ def notify(text):
         print("Telegram notify failed", flush=True)
 
 
+def wib(ts=None):
+    """Format a timestamp as HH:MM:SS in WIB (UTC+7)."""
+    ts = time.time() if ts is None else ts
+    return time.strftime("%H:%M:%S", time.gmtime(ts + 7 * 3600))
+
+
+def log(text):
+    """Print a line prefixed with the current WIB time."""
+    print(f"{wib()} WIB | {text}", flush=True)
+
+
 def mark_success():
     """Tell the workflow it can disable itself."""
     out = os.environ.get("GITHUB_OUTPUT")
@@ -111,19 +122,23 @@ def main():
 
     deadline = time.time() + TIME_BUDGET_SECONDS
     attempt = 0
+    log(f"Mulai. Batas sesi {TIME_BUDGET_SECONDS / 3600:.1f} jam.")
 
     while time.time() < deadline:
         attempt += 1
+        extra = 0
+        reason = "capacity penuh / error sementara"
+        log(f"[{attempt}] mencoba membuat instance...")
         try:
             instance = compute.launch_instance(details).data
             notify(f"OCI hunt: BERHASIL! Instance {instance.display_name} dibuat "
                    f"(state: {instance.lifecycle_state}). Cek Console Oracle.")
-            print(f"[{attempt}] SUCCESS", flush=True)
+            log(f"[{attempt}] BERHASIL, instance dibuat.")
             mark_success()
             return 0
         except oci.exceptions.ServiceError as e:
             # "Out of host capacity" comes back as HTTP 500 / InternalError.
-            print(f"[{attempt}] {e.status} {e.code}", flush=True)
+            log(f"[{attempt}] gagal: {e.status} {e.code}")
             retryable = e.status in (429, 500, 502, 503, 504) or \
                 "capacity" in (e.message or "").lower()
             if not retryable:
@@ -131,10 +146,12 @@ def main():
                        f"retry tidak akan membantu.")
                 return 1
             if e.status == 429:
-                time.sleep(120)  # rate limited: back off harder
+                extra = 120  # rate limited: back off harder
+                reason = "kena rate limit 429"
         except Exception as e:
             # Network hiccup: the launch may have gone through, so check.
-            print(f"[{attempt}] {type(e).__name__}", flush=True)
+            log(f"[{attempt}] gagal: {type(e).__name__}")
+            reason = "error jaringan"
             try:
                 if already_exists():
                     notify("OCI hunt: instance terdeteksi sudah ada, berhenti.")
@@ -143,7 +160,12 @@ def main():
             except Exception:
                 pass
 
-        time.sleep(random.randint(45, 90))
+        delay = extra + random.randint(45, 90)
+        sisa = max(0, int(deadline - time.time()))
+        next_at = wib(time.time() + delay)
+        log(f"[{attempt}] tunggu {delay} detik ({reason}); percobaan ke-{attempt + 1} "
+            f"jam {next_at} WIB; sisa sesi {sisa // 60} menit")
+        time.sleep(delay)
 
     notify(f"OCI hunt: sesi habis setelah {attempt} percobaan, run berikutnya lanjut.")
     return 0
