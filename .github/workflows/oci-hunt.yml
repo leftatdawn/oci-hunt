@@ -1,0 +1,52 @@
+# Taruh file ini di: .github/workflows/oci-hunt.yml
+name: OCI hunt
+
+on:
+  schedule:
+    - cron: "7 */6 * * *"   # penyambung tiap 6 jam; loop retry ada di dalam job
+  workflow_dispatch:         # tombol "Run workflow" buat tes manual
+
+permissions:
+  contents: read
+  actions: write             # supaya workflow bisa disable dirinya sendiri
+
+concurrency:
+  group: oci-hunt
+  cancel-in-progress: false  # jangan numpuk, run baru antre
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install oci requests
+
+      - name: Hunt
+        id: hunt
+        run: python hunt.py
+        env:
+          OCI_USER: ${{ secrets.OCI_USER }}
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+          COMPARTMENT_ID: ${{ secrets.COMPARTMENT_ID }}
+          AVAILABILITY_DOMAIN: ${{ secrets.AVAILABILITY_DOMAIN }}
+          SUBNET_ID: ${{ secrets.SUBNET_ID }}
+          IMAGE_ID: ${{ secrets.IMAGE_ID }}
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+
+      - name: Stop workflow after success
+        if: steps.hunt.outputs.success == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable "OCI hunt" --repo "${{ github.repository }}"
