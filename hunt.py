@@ -12,8 +12,11 @@ import time
 import oci
 import requests
 
-# Stop a bit before GitHub's 6h job limit so the run ends cleanly.
-TIME_BUDGET_SECONDS = 5.5 * 3600
+# Total time from job start (JOB_START, set by the workflow) until this script
+# ends: 5h48m. GitHub kills a job at 6h, so this leaves 12 minutes of margin.
+TIME_BUDGET_SECONDS = (5 * 60 + 48) * 60
+# Don't start a new attempt in the last seconds of the budget.
+END_MARGIN_SECONDS = 30
 
 
 def env(key, default=None):
@@ -33,11 +36,15 @@ def notify(text):
         requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
             data={"chat_id": chat_id, "text": text},
-            timeout=15,
+            timeout=10,
         )
     except Exception:
         # Never print the exception: the URL contains the bot token.
         print("Telegram notify failed", flush=True)
+
+
+RUN_NO = os.environ.get("GITHUB_RUN_NUMBER", "?")
+RUNS_ACTIVE = os.environ.get("RUNS_ACTIVE", "?")
 
 
 def wib(ts=None):
@@ -51,12 +58,17 @@ def log(text):
     print(f"{wib()} WIB | {text}", flush=True)
 
 
-def mark_success():
-    """Tell the workflow it can disable itself."""
+def set_output(name):
+    """Set a step output (name=true) that the workflow can react to."""
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
         with open(out, "a") as f:
-            f.write("success=true\n")
+            f.write(f"{name}=true\n")
+
+
+def mark_success():
+    """Tell the workflow it can disable itself."""
+    set_output("success")
 
 
 config = {
@@ -70,7 +82,7 @@ oci.config.validate_config(config)
 compute = oci.core.ComputeClient(config)
 
 compartment = env("COMPARTMENT_ID")
-name = os.environ.get("INSTANCE_NAME", "arm-free")
+name = os.environ.get("INSTANCE_NAME", "leftatdawn")
 
 shape = os.environ.get("SHAPE", "VM.Standard.A1.Flex")
 ocpus = float(os.environ.get("OCPUS", "2"))
@@ -113,18 +125,21 @@ def already_exists():
 
 
 def main():
-    notify("OCI hunt: run dimulai, mulai nyari slot.")
+    notify(f"OCI hunt: run #{RUN_NO} dimulai. Run aktif/antre saat ini: {RUNS_ACTIVE}.")
 
     if already_exists():
         notify("OCI hunt: instance sudah ada, berhenti.")
         mark_success()
         return 0
 
-    deadline = time.time() + TIME_BUDGET_SECONDS
+    job_start = float(os.environ.get("JOB_START") or time.time())
+    deadline = job_start + TIME_BUDGET_SECONDS
     attempt = 0
-    log(f"Mulai. Batas sesi {TIME_BUDGET_SECONDS / 3600:.1f} jam.")
+    log(f"Mulai run #{RUN_NO}. Run aktif/antre: {RUNS_ACTIVE}. "
+        f"Batas sesi {TIME_BUDGET_SECONDS // 3600} jam "
+        f"{TIME_BUDGET_SECONDS % 3600 // 60} menit sejak job mulai.")
 
-    while time.time() < deadline:
+    while deadline - time.time() > END_MARGIN_SECONDS:
         attempt += 1
         extra = 0
         reason = "capacity penuh / error sementara"
@@ -165,9 +180,11 @@ def main():
         next_at = wib(time.time() + delay)
         log(f"[{attempt}] tunggu {delay} detik ({reason}); percobaan ke-{attempt + 1} "
             f"jam {next_at} WIB; sisa sesi {sisa // 60} menit")
-        time.sleep(delay)
+        # Never sleep past the deadline, or the run could hit GitHub's 6h kill.
+        time.sleep(max(0, min(delay, deadline - time.time() - END_MARGIN_SECONDS)))
 
-    notify(f"OCI hunt: sesi habis setelah {attempt} percobaan, run berikutnya lanjut.")
+    set_output("again")  # workflow starts the next run right away
+    notify(f"OCI hunt: run #{RUN_NO} habis setelah {attempt} percobaan, run berikutnya lanjut.")
     return 0
 
 
