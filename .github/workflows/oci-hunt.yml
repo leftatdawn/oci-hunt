@@ -12,13 +12,16 @@ permissions:
 
 concurrency:
   group: oci-hunt
-  cancel-in-progress: false  # jangan numpuk, run baru antre
+  cancel-in-progress: true   # run baru menghentikan run lama, jadi tidak pernah dobel
 
 jobs:
   hunt:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 355   # cuma jaring pengaman kalau job macet; script berhenti sendiri di 5j48m
     steps:
+      - name: Record job start
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -28,10 +31,21 @@ jobs:
       - name: Install dependencies
         run: pip install oci requests
 
+      - name: Count active runs
+        id: runs
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh run list --workflow oci-hunt.yml --repo "${{ github.repository }}" \
+            --json status --jq '[.[] | select(.status=="in_progress" or .status=="queued")] | length')
+          echo "active=$n" >> "$GITHUB_OUTPUT"
+
       - name: Hunt
         id: hunt
         run: python hunt.py
         env:
+          RUNS_ACTIVE: ${{ steps.runs.outputs.active || '?' }}
           OCI_USER: ${{ secrets.OCI_USER }}
           OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
           OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
@@ -44,6 +58,12 @@ jobs:
           SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+
+      - name: Start the next run right away
+        if: steps.hunt.outputs.again == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run oci-hunt.yml --repo "${{ github.repository }}"
 
       - name: Stop workflow after success
         if: steps.hunt.outputs.success == 'true'
