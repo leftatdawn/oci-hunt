@@ -43,8 +43,26 @@ def notify(text):
         print("Telegram notify failed", flush=True)
 
 
+ATTEMPTS_FILE = "attempts.txt"  # restored/saved between runs by the workflow cache
 RUN_NO = os.environ.get("GITHUB_RUN_NUMBER", "?")
 RUNS_ACTIVE = os.environ.get("RUNS_ACTIVE", "?")
+
+
+def load_total():
+    """Total attempts made by earlier runs (0 if unknown)."""
+    try:
+        with open(ATTEMPTS_FILE) as f:
+            return int(f.read().strip())
+    except Exception:
+        return 0
+
+
+def save_total(n):
+    try:
+        with open(ATTEMPTS_FILE, "w") as f:
+            f.write(str(n))
+    except Exception:
+        pass
 
 
 def wib(ts=None):
@@ -125,7 +143,8 @@ def already_exists():
 
 
 def main():
-    notify(f"OCI hunt: run #{RUN_NO} dimulai. Run aktif/antre saat ini: {RUNS_ACTIVE}.")
+    notify(f"OCI hunt: run #{RUN_NO} dimulai. Run aktif/antre saat ini: {RUNS_ACTIVE}. "
+           f"Total percobaan sebelumnya: {load_total()}.")
 
     if already_exists():
         notify("OCI hunt: instance sudah ada, berhenti.")
@@ -135,25 +154,29 @@ def main():
     job_start = float(os.environ.get("JOB_START") or time.time())
     deadline = job_start + TIME_BUDGET_SECONDS
     attempt = 0
+    total = load_total()
     log(f"Mulai run #{RUN_NO}. Run aktif/antre: {RUNS_ACTIVE}. "
+        f"Total percobaan sebelumnya: {total}. "
         f"Batas sesi {TIME_BUDGET_SECONDS // 3600} jam "
         f"{TIME_BUDGET_SECONDS % 3600 // 60} menit sejak job mulai.")
 
     while deadline - time.time() > END_MARGIN_SECONDS:
         attempt += 1
+        total += 1
+        save_total(total)
         extra = 0
         reason = "capacity penuh / error sementara"
-        log(f"[{attempt}] mencoba membuat instance...")
+        log(f"[#{total}] mencoba membuat instance...")
         try:
             instance = compute.launch_instance(details).data
             notify(f"OCI hunt: BERHASIL! Instance {instance.display_name} dibuat "
                    f"(state: {instance.lifecycle_state}). Cek Console Oracle.")
-            log(f"[{attempt}] BERHASIL, instance dibuat.")
+            log(f"[#{total}] BERHASIL, instance dibuat.")
             mark_success()
             return 0
         except oci.exceptions.ServiceError as e:
             # "Out of host capacity" comes back as HTTP 500 / InternalError.
-            log(f"[{attempt}] gagal: {e.status} {e.code}")
+            log(f"[#{total}] gagal: {e.status} {e.code}")
             retryable = e.status in (429, 500, 502, 503, 504) or \
                 "capacity" in (e.message or "").lower()
             if not retryable:
@@ -165,7 +188,7 @@ def main():
                 reason = "kena rate limit 429"
         except Exception as e:
             # Network hiccup: the launch may have gone through, so check.
-            log(f"[{attempt}] gagal: {type(e).__name__}")
+            log(f"[#{total}] gagal: {type(e).__name__}")
             reason = "error jaringan"
             try:
                 if already_exists():
@@ -178,13 +201,13 @@ def main():
         delay = extra + random.randint(45, 90)
         sisa = max(0, int(deadline - time.time()))
         next_at = wib(time.time() + delay)
-        log(f"[{attempt}] tunggu {delay} detik ({reason}); percobaan ke-{attempt + 1} "
+        log(f"[#{total}] tunggu {delay} detik ({reason}); percobaan ke-{total + 1} "
             f"jam {next_at} WIB; sisa sesi {sisa // 60} menit")
         # Never sleep past the deadline, or the run could hit GitHub's 6h kill.
         time.sleep(max(0, min(delay, deadline - time.time() - END_MARGIN_SECONDS)))
 
     set_output("again")  # workflow starts the next run right away
-    notify(f"OCI hunt: run #{RUN_NO} habis setelah {attempt} percobaan, run berikutnya lanjut.")
+    notify(f"OCI hunt: run #{RUN_NO} habis setelah {attempt} percobaan (total semua run: {total}), run berikutnya lanjut.")
     return 0
 
 
