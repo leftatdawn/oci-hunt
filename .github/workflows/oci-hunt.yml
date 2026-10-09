@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: oci-hunt
-  cancel-in-progress: true   # run baru menghentikan run lama, jadi tidak pernah dobel
+  cancel-in-progress: false  # run baru antre sampai run lama selesai (hitungan percobaan aman)
 
 jobs:
   hunt:
@@ -30,6 +30,13 @@ jobs:
 
       - name: Install dependencies
         run: pip install oci requests
+
+      - name: Restore attempt counter
+        uses: actions/cache/restore@v4
+        with:
+          path: attempts.txt
+          key: attempts-none
+          restore-keys: attempts-
 
       - name: Count active runs
         id: runs
@@ -58,6 +65,14 @@ jobs:
           SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+
+      - name: Save attempt counter
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: attempts.txt
+          key: attempts-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Start the next run right away
         if: steps.hunt.outputs.again == 'true'
